@@ -1,0 +1,24 @@
+2025-03-23 20:09:05.695 | INFO     | __main__:convert_to_traditional:102 - 111111111111111111111111111111111111111111111111111111111
+2025-03-23 20:09:05.698 | INFO     | __main__:convert_to_traditional:103 - Working on directory: U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】\CD 01
+2025-03-23 20:09:05.713 | DEBUG    | __main__:convert_to_traditional:113 - Renamed file to: 03 - 側麵 (Live).flac
+2025-03-23 20:09:05.720 | INFO     | __main__:convert_to_traditional:102 - 111111111111111111111111111111111111111111111111111111111
+2025-03-23 20:09:05.721 | INFO     | __main__:convert_to_traditional:103 - Working on directory: U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】\CD 02
+2025-03-23 20:09:05.736 | DEBUG    | __main__:convert_to_traditional:113 - Renamed file to: 03 - 韆韆闋歌 (Live).flac
+2025-03-23 20:09:05.742 | INFO     | __main__:convert_to_traditional:102 - 111111111111111111111111111111111111111111111111111111111
+2025-03-23 20:09:05.742 | INFO     | __main__:convert_to_traditional:103 - Working on directory: U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】\CD 03
+2025-03-23 20:09:05.743 | INFO     | __main__:convert_to_traditional:102 - 111111111111111111111111111111111111111111111111111111111
+2025-03-23 20:09:05.745 | INFO     | __main__:convert_to_traditional:103 - Working on directory: U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】
+2025-03-23 20:09:05.765 | INFO     | __main__:detect_encoding:66 - Detected encoding: UTF-8-SIG
+2025-03-23 20:09:05.772 | DEBUG    | __main__:convert_and_save:94 - Converting content of file: U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】\List.txt
+2025-03-23 20:09:05.784 | INFO     | __main__:rename_files:135 - 22222222222222222222222222222222222222222222222222
+2025-03-23 20:09:05.803 | DEBUG    | __main__:rename_files:149 - Renamed file: U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】\CD 01\01 - Opening_ 為妳鍾情 (Live).flac to U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】\CD 01\01 - Opening_ 為妳鐘情 (Live).flac
+2025-03-23 20:09:05.819 | DEBUG    | __main__:rename_files:149 - Renamed file: U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】\CD 01\03 - 側麵 (Live).flac to U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】\CD 01\03 - 側面 (Live).flac
+2025-03-23 20:09:05.848 | DEBUG    | __main__:rename_files:149 - Renamed file: U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】\CD 02\03 - 韆韆闋歌 (Live).flac to U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】\CD 02\03 - 千千闋歌 (Live).flac
+2025-03-23 20:09:05.863 | INFO     | __main__:replace_in_files:152 - 3333333333333333333333333333333333333333333333333333333333333
+2025-03-23 20:09:05.882 | INFO     | __main__:detect_encoding:66 - Detected encoding: utf-8
+2025-03-23 20:09:05.893 | DEBUG    | __main__:replace_in_files:166 - Replaced content (if found) in file: U:\张国荣.2024 - 张国荣告别乐坛演唱会 Live in Hong Kong 1989-1990 3CD【环球】 【FLAC分轨】\List.txt
+2025-03-23 20:09:05.894 | INFO     | __main__:rename_directories:169 - 4444444444444444444444444444444444444444444444444444444444
+2025-03-23 20:09:05.898 | DEBUG    | __main__:rename_directories:177 - Renamed directory: CD 01 to CD 01
+2025-03-23 20:09:05.898 | DEBUG    | __main__:rename_directories:177 - Renamed directory: CD 02 to CD 02
+2025-03-23 20:09:05.899 | DEBUG    | __main__:rename_directories:177 - Renamed directory: CD 03 to CD 03
+2025-03-23 20:09:05.900 | INFO     | __main__:<module>:199 - Done Done Done
