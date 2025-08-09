@@ -1662,7 +1662,7 @@ text_monitor_interval.label.set_fontsize(9)
 text_monitor_interval.text_disp.set_fontsize(9)
 
 # 參數套用按鈕
-ax_apply = plt.axes([0.45, 0.27, 0.08, 0.04])
+ax_apply = plt.axes([0.45, 0.24, 0.08, 0.04])  #left, bottom, width, and height of the axes, 
 button_apply = Button(ax_apply, '套用')
 button_apply.label.set_fontsize(10)
 button_apply.on_clicked(on_apply_params)
