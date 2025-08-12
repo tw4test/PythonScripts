@@ -70,12 +70,6 @@ def log(msg):
     timestamp = time.strftime("%H:%M:%S")
     print(f"[{timestamp}] {msg}")
 
-
-def log_without_timestamp(msg):
-    """無時間戳的日誌函數（用於已有時間戳的日誌）"""
-    print(msg)
-
-
 # 初始化 console 對象
 if RICH_AVAILABLE:
     console = Console()
@@ -367,6 +361,22 @@ def init_db(db_path=DB_PATH):
     log("[數據庫] 初始化完成")
     return conn
 
+def run_remote_shell_script(script_path):
+    """執行遠端 shell 腳本"""
+    try:
+        log(f"[ADB] 執行腳本: {script_path}")
+        output = run_adb_command(["shell", "sh", script_path])
+        console.print(f"[green]✓ 腳本執行完成: {script_path}[/green]")
+        if output:
+            console.print(f"[blue]{output}[/blue]")
+    except Exception as e:
+        console.print(f"[red]✗ 腳本執行失敗: {e}[/red]")
+
+def on_run_scan_script(event):
+    run_remote_shell_script("/sdcard/ToProcess/scan.sh")
+
+def on_run_clean_script(event):
+    run_remote_shell_script("/sdcard/ToProcess/clean.sh")
 
 def calculate_file_hash(file_path, chunk_size=8192):
     """計算文件的MD5哈希值"""
@@ -472,14 +482,9 @@ def query_pending_files_count():
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
 
-        # 詳細查詢各種狀態的文件數
-        cur.execute("SELECT status, COUNT(*) FROM files GROUP BY status")
-        status_counts = dict(cur.fetchall())
-
-        pending_count = status_counts.get('pending', 0)
-
-       # print(f"[調試] 文件狀態統計: {status_counts}")
-       # print(f"[調試] 待處理文件數: {pending_count}")
+        # Include both 'pending' and 'failed' files in the count
+        cur.execute("SELECT COUNT(*) FROM files WHERE status IN ('pending', 'failed')")
+        pending_count = cur.fetchone()[0]
 
         conn.close()
         return pending_count
@@ -648,138 +653,6 @@ class DynamicBatchManager:
             self.batch_files = []
             self.successful_pushes = 0
 
-
-class TrueDynamicBatchManager:
-    """真正的动态批次管理器 - 无数据库依赖"""
-
-    def __init__(self, conn):
-        self.conn = conn
-        self.current_virtual_batch = []
-        self.batch_stats = {
-            'total_size': 0,
-            'file_count': 0,
-            'successful_pushes': 0
-        }
-
-    def get_next_virtual_batch(self, max_files=None, max_size_gb=None):
-        """纯内存操作 - 从数据库读取但不修改状态 (always use latest params)"""
-        # Always use the latest values from params if not explicitly provided
-        max_files = params.get('batch_size', 1000) if max_files is None else max_files
-        max_size_gb = params.get('batch_size_gb', 90) if max_size_gb is None else max_size_gb
-
-        cur = self.conn.cursor()
-
-        # 只读查询，不修改数据库
-        cur.execute("""
-            SELECT id, path, size
-            FROM files
-            WHERE status='pending'
-            ORDER BY id ASC
-            LIMIT ?
-        """, (max_files * 2,))
-
-        pending_files = cur.fetchall()
-
-        if not pending_files:
-            return []
-
-        # 🟢 纯内存中的批次组合
-        max_size_bytes = max_size_gb * 1024 * 1024 * 1024
-        selected_files = []
-        current_size = 0
-
-        for file_id, path, size in pending_files:
-            if (len(selected_files) >= max_files or
-                    current_size + size > max_size_bytes):
-                break
-
-            selected_files.append({
-                'id': file_id,
-                'path': path,
-                'size': size
-            })
-            current_size += size
-
-        # 🟢 只更新内存中的统计
-        self.current_virtual_batch = selected_files
-        self.batch_stats = {
-            'total_size': current_size,
-            'file_count': len(selected_files),
-            'successful_pushes': 0
-        }
-        log(f"[虚拟批次] 内存中组建 {len(selected_files)} 个文件，{current_size/1024/1024:.1f}MB")
-        return selected_files
-
-    def mark_file_pushed_virtual(self, file_path):
-        """虚拟标记 - 只在内存中记录，不修改数据库"""
-        self.batch_stats['successful_pushes'] += 1
-        # print(f"[虚拟推送] {os.path.basename(file_path)} (内存计数: {self.batch_stats['successful_pushes']})")
-        return True
-
-    def commit_batch_to_database(self):
-        """批次完成后一次性提交到数据库"""
-        if not self.current_virtual_batch:
-            return 0
-
-        cur = self.conn.cursor()
-        push_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-        # 🟢 一次性批量更新所有成功的文件
-        successful_files = self.current_virtual_batch[:self.batch_stats['successful_pushes']]
-
-        for file_info in successful_files:
-            cur.execute("""
-                UPDATE files
-                SET status='completed', push_time=?, updated_at=CURRENT_TIMESTAMP
-                WHERE id=?
-            """, (push_time, file_info['id']))
-
-        self.conn.commit()
-        success_count = len(successful_files)
-        log(f"[数据库提交] 一次性更新 {success_count} 个文件状态")
-        # 清理内存
-        self.current_virtual_batch = []
-        self.batch_stats = {'total_size': 0, 'file_count': 0, 'successful_pushes': 0}
-        return success_count
-        try:
-            # 更新開始按鈕
-            start_config = config.get('start_button', {})
-            if 'text' in start_config and 'button_start' in globals():
-                button_start.label.set_text(start_config['text'])
-            if 'color' in start_config and 'button_start' in globals():
-                button_start.color = start_config['color']
-                button_start.hovercolor = start_config['color']
-
-            # 更新掃描按鈕
-            scan_config = config.get('scan_button', {})
-            if 'text' in scan_config and 'button_scan' in globals():
-                button_scan.label.set_text(scan_config['text'])
-            if 'color' in scan_config and 'button_scan' in globals():
-                button_scan.color = scan_config['color']
-                button_scan.hovercolor = scan_config['color']
-
-            # 更新停止按鈕
-            stop_config = config.get('stop_button', {})
-            if 'text' in stop_config and 'button_stop' in globals():
-                button_stop.label.set_text(stop_config['text'])
-            if 'color' in stop_config and 'button_stop' in globals():
-                button_stop.color = stop_config['color']
-                button_stop.hovercolor = stop_config['color']
-
-            # 更新刷新按鈕
-            refresh_config = config.get('refresh_button', {})
-            if 'color' in refresh_config and 'button_refresh' in globals():
-                button_refresh.color = refresh_config['color']
-                button_refresh.hovercolor = refresh_config['color']
-
-            # 重繪界面
-            if 'fig' in globals():
-                fig.canvas.draw_idle()
-
-        except Exception as e:
-            log(f"[UI錯誤] 更新按鈕狀態失敗: {e}")
-
-
 def adb_move_remote_folder(src, dst):
     log(f"[ADB] 移動: {src} -> {dst}")
     run_adb_command(["shell", "mv", src, dst])
@@ -862,40 +735,6 @@ def get_cpu_usage():
     except Exception as e:
         log(f"取得 CPU 使用率錯誤: {e}")
         return 0.0
-
-
-def get_current_batch_size():
-    """Get the file count of the currently processing batch"""
-    global batch_in_process
-
-    if not batch_in_process:
-        return 0
-
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-
-        # Get the currently processing batch
-        cur.execute("""
-            SELECT virtual_batch_id, file_count 
-            FROM batch_history 
-            WHERE status='processing' 
-            ORDER BY id DESC 
-            LIMIT 1
-        """)
-
-        result = cur.fetchone()
-        conn.close()
-
-        if result:
-            batch_id, file_count = result
-            return file_count
-        else:
-            return 0
-
-    except Exception as e:
-        log(f"[錯誤] 無法獲取當前批次大小: {e}")
-        return 0
 
 
 # /////////////////////////////////////////////////////////////////////////////
@@ -1231,7 +1070,7 @@ def dynamic_batch_process_thread():
                                         f"[bold cyan]📦 處理批次 {total_processed_batches + 1}: {len(file_batch)} 個文件[/bold cyan]")
 
                                     # 清理和推送（使用 rich progress）
-                                    clean_camera_batch()
+                                    # clean_camera_batch()
 
                                     remote_temp_folder = f"{REMOTE_ROOT}/temp_{int(time.time())}"
                                     success_count = push_files_individually(
@@ -1298,159 +1137,6 @@ def dynamic_batch_process_thread():
         batch_processing = False
         ui_state.set_state('idle')
         update_pending_count_text()
-
-
-def optimized_batch_process_thread():
-    """优化的批次处理 - 最小化数据库操作"""
-    global batch_in_process, batch_processing
-    console.print("[bold green]🚀 优化批次处理启动[/bold green]")
-
-    try:
-        conn = init_db()
-        batch_manager = TrueDynamicBatchManager(conn)
-        total_processed_batches = 0
-
-        while batch_processing:
-            try:
-                with cpu_status_lock:
-                    active = cpu_active_flag
-
-                if not active:
-                    with batch_processing_lock:
-                        if not batch_in_process:
-                            # 🟢 纯虚拟批次选择，不修改数据库
-                            virtual_batch = batch_manager.get_next_virtual_batch()
-
-                            if virtual_batch:
-                                batch_in_process = True
-
-                                try:
-                                    console.print(
-                                        f"[bold cyan]📦 处理虚拟批次: {len(virtual_batch)} 个文件[/bold cyan]")
-
-                                    # 推送文件（虚拟标记）
-                                    remote_temp_folder = f"{REMOTE_ROOT}/temp_{int(time.time())}"
-                                    success_count = push_files_with_virtual_tracking(
-                                        batch_manager, virtual_batch, remote_temp_folder
-                                    )
-
-                                    if success_count > 0:
-                                        # 移动到Camera目录
-                                        camera_folder = f"{CAMERA_ROOT}/batch_{int(time.time())}"
-                                        if move_remote_folder_safe(remote_temp_folder, camera_folder):
-
-                                            # 等待备份完成
-                                            console.print(
-                                                "[yellow]⏳ 等待 Google Photos 备份完成...[/yellow]")
-                                            wait_for_backup_complete()
-
-                                            # 🟢 只在最后一步提交到数据库
-                                            committed_count = batch_manager.commit_batch_to_database()
-
-                                            cleanup_camera_folder(
-                                                camera_folder)
-                                            total_processed_batches += 1
-
-                                            console.print(
-                                                f"[green]✓ 虚拟批次 {total_processed_batches} 完成，已提交 {committed_count} 个文件[/green]")
-                                        else:
-                                            console.print(
-                                                "[red]✗ 批次搬移失败[/red]")
-                                    else:
-                                        console.print("[red]✗ 批次推送失败[/red]")
-
-                                except Exception as e:
-                                    console.print(f"[red]✗ 批次处理异常: {e}[/red]")
-                                finally:
-                                    batch_in_process = False
-                            else:
-                                # 检查完成
-                                if check_all_files_processed_with_retry(conn):
-                                    console.print(
-                                        f"[bold green]🎉 所有文件处理完成！总共处理 {total_processed_batches} 个虚拟批次[/bold green]")
-                                    show_completion_notification(
-                                        total_processed_batches)
-                                    break
-                                else:
-                                    time.sleep(1)
-                        else:
-                            time.sleep(1)
-                else:
-                    time.sleep(1)
-
-            except Exception as e:
-                console.print(f"[red]线程错误: {e}[/red]")
-                time.sleep(5)
-
-        conn.close()
-        console.print("[bold blue]📴 优化批次处理结束[/bold blue]")
-
-    finally:
-        batch_processing = False
-        ui_state.set_state('idle')
-        update_pending_count_text()
-
-
-def push_files_with_virtual_tracking(batch_manager, file_batch, remote_folder):
-    """推送文件 - 使用虚拟追踪"""
-    try:
-        adb_create_remote_folder(remote_folder)
-    except Exception as e:
-        log(f"推送: 建立远端目录失败: {e}")
-        return 0
-
-    success_count = 0
-
-    if RICH_AVAILABLE:
-        with Progress(
-            TextColumn("[bold blue]{task.description}"),
-            BarColumn(bar_width=40),
-            "[progress.percentage]{task.percentage:>3.0f}%",
-            "({task.completed}/{task.total})",
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            console=console,
-            transient=False,
-        ) as progress:
-
-            task = progress.add_task(
-                f"推送虚拟批次文件",
-                total=len(file_batch)
-            )
-
-
-            for i, file_info in enumerate(file_batch):
-                if not batch_processing:
-                    log("[UI] 停止請求已收到，終止推送循環")
-                    break
-                file_path = file_info['path']
-                filename = os.path.basename(file_path)
-
-                progress.update(
-                    task,
-                    description=f"推送: {filename[:40]}{'...' if len(filename) > 40 else ''}"
-                )
-
-                try:
-                    # 实际推送文件
-                    adb_push_file_silent(file_path, remote_folder)
-
-                    # 🟢 只在内存中标记，不修改数据库
-                    if batch_manager.mark_file_pushed_virtual(file_path):
-                        success_count += 1
-
-                    progress.update(task, advance=1)
-
-                except Exception as e:
-                    log(f"推送失败: {filename}: {str(e)[:50]}")
-                    progress.update(task, advance=1)
-
-            progress.update(
-                task,
-                description=f"[green]✓ 虚拟批次推送完成: {success_count}/{len(file_batch)} 成功[/green]"
-            )
-
-    return success_count
 
 
 # /////////////////////////////////////////////////////////////////////////////
@@ -1684,6 +1370,10 @@ def update(frame):
 
 def on_start_dynamic(event):
     """動態批次版開始傳輸"""
+
+    # 新增：自動套用參數
+    apply_params_from_ui()    
+
     can_start, message = ui_state.can_perform_action('start_transfer', 3.0)
     if not can_start:
         print(f"[防護] {message}")
@@ -1766,8 +1456,20 @@ def on_stop_final(event):
     else:
         print("[提示] 批次處理未在運行")
 
+def on_refresh_pending_count_final(event):
+    """刷新計數"""
+    can_refresh, message = ui_state.can_perform_action('refresh', 1.0)
+    if not can_refresh:
+        print(f"[防護] {message}")
+        return
 
-def on_apply_params(event):
+    update_pending_count_text()
+
+def on_run_refresh_album_script(event):
+    run_remote_shell_script("/sdcard/ToProcess/refresh.sh")
+
+def apply_params_from_ui():
+    """自動從UI元件讀取並更新參數"""
     global params
     try:
         batch_size_val = int(text_batch_size.text)
@@ -1782,21 +1484,10 @@ def on_apply_params(event):
             'monitor_interval': monitor_interval_val,
             'max_rounds': max_rounds_val,
         })
-        log(f"[UI] 參數更新: batch_size={batch_size_val}, batch_size_gb={batch_size_gb_val}GB, cpu_threshold={cpu_threshold_val}, interval={monitor_interval_val}s, max_rounds={max_rounds_val}")
+        log(f"[UI] 參數自動套用: batch_size={batch_size_val}, batch_size_gb={batch_size_gb_val}GB, cpu_threshold={cpu_threshold_val}, interval={monitor_interval_val}s, max_rounds={max_rounds_val}")
     except Exception as e:
-        log(f"[UI] 參數更新錯誤: {e}")
-    update_status_text()
-
-
-def on_refresh_pending_count_final(event):
-    """刷新計數"""
-    can_refresh, message = ui_state.can_perform_action('refresh', 1.0)
-    if not can_refresh:
-        print(f"[防護] {message}")
-        return
-
-    update_pending_count_text()
-
+        log(f"[UI] 參數自動套用錯誤: {e}")
+    update_status_text()    
 
 # /////////////////////////////////////////////////////////////////////////////
 # 建立 UI 主畫面
@@ -1853,34 +1544,48 @@ text_monitor_interval = TextBox(
 text_monitor_interval.label.set_fontsize(9)
 text_monitor_interval.text_disp.set_fontsize(9)
 
-# 參數套用按鈕
-ax_apply = plt.axes([0.45, 0.28, 0.08, 0.06])
-button_apply = Button(ax_apply, '套用')
-button_apply.label.set_fontsize(10)
-button_apply.on_clicked(on_apply_params)
+# 按鈕區域統一對齊，分兩行
+button_width = 0.1
+button_height = 0.06
+button_gap_x = 0.02
+button_gap_y = 0.07
+base_x = 0.58
+base_y_top = 0.28
+base_y_bottom = base_y_top - button_gap_y
 
-# 開始與停止按鈕 - 動態批次版本
-ax_start = plt.axes([0.58, 0.28, 0.1, 0.06])
+# 第一行：開始傳輸、停止傳輸、掃描本地資料夾
+ax_start = plt.axes([base_x, base_y_top, button_width, button_height])
 button_start = Button(ax_start, '開始傳輸')
 button_start.label.set_fontsize(12)
 button_start.on_clicked(on_start_dynamic)
 
-ax_stop = plt.axes([0.70, 0.28, 0.1, 0.06])
+ax_stop = plt.axes([base_x + button_width + button_gap_x, base_y_top, button_width, button_height])
 button_stop = Button(ax_stop, '停止傳輸')
 button_stop.label.set_fontsize(12)
 button_stop.on_clicked(on_stop_final)
 
-# 掃描本地資料夾按鈕
-ax_scan = plt.axes([0.58, 0.20, 0.22, 0.06])
+ax_scan = plt.axes([base_x + 2 * (button_width + button_gap_x), base_y_top, button_width, button_height])
 button_scan = Button(ax_scan, '掃描本地資料夾')
 button_scan.label.set_fontsize(12)
-button_scan.on_clicked(on_scan_folder_final)  # 使用動態批次版本
+button_scan.on_clicked(on_scan_folder_final)
 
-# 刷新待處理文件數按鈕
-ax_refresh = plt.axes([0.44, 0.18, 0.1, 0.06])
-button_refresh = Button(ax_refresh, '刷新數字')
-button_refresh.label.set_fontsize(10)
-button_refresh.on_clicked(on_refresh_pending_count_final)
+# 第二行：手機掃描、手機清理、重新整理相冊
+ax_scan_script = plt.axes([base_x, base_y_bottom, button_width, button_height])
+button_scan_script = Button(ax_scan_script, '手機掃描')
+button_scan_script.label.set_fontsize(12)
+button_scan_script.on_clicked(on_run_scan_script)
+
+ax_clean_script = plt.axes([base_x + button_width + button_gap_x, base_y_bottom, button_width, button_height])
+button_clean_script = Button(ax_clean_script, '手機清理')
+button_clean_script.label.set_fontsize(12)
+button_clean_script.on_clicked(on_run_clean_script)
+
+ax_refresh_album_script = plt.axes([base_x + 2 * (button_width + button_gap_x), base_y_bottom, button_width, button_height])
+button_refresh_album_script = Button(ax_refresh_album_script, '重新整理相冊')
+button_refresh_album_script.label.set_fontsize(12)
+button_refresh_album_script.on_clicked(on_run_refresh_album_script)
+
+
 
 # 啟動畫面動畫刷新
 ani = FuncAnimation(fig, update, interval=1000)
