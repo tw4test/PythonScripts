@@ -1585,7 +1585,11 @@ button_refresh_album_script = Button(ax_refresh_album_script, '重新整理相�
 button_refresh_album_script.label.set_fontsize(12)
 button_refresh_album_script.on_clicked(on_run_refresh_album_script)
 
-
+# 刷新待處理文件數按鈕
+ax_refresh = plt.axes([0.44, 0.18, 0.1, 0.05])
+button_refresh = Button(ax_refresh, '刷新數字')
+button_refresh.label.set_fontsize(10)
+button_refresh.on_clicked(on_refresh_pending_count_final)
 
 # 啟動畫面動畫刷新
 ani = FuncAnimation(fig, update, interval=1000)
