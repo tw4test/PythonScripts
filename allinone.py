@@ -39,6 +39,7 @@ import time
 from collections import deque
 from datetime import datetime
 import hashlib
+from queue import Queue  # Add this import
 
 from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.console import Console
@@ -123,7 +124,11 @@ batch_in_process = False
 operation_lock = threading.Lock()
 
 
+
+
+
 # /////////////////////////////////////////////////////////////////////////////
+
 # UI狀態管理系統
 class UIStateManager:
     """UI狀態管理器"""
@@ -1037,6 +1042,463 @@ def cpu_monitor_thread():
     log("[CPU監控] 線程結束")
 
 
+class StorageAwareBatchManager(DynamicBatchManager):
+    """Storage-aware batch manager with dynamic sizing"""
+    
+    def __init__(self, conn):
+        super().__init__(conn)
+        self.min_batch_size_gb = 5   # Minimum viable batch
+        self.max_batch_size_gb = params.get('batch_size_gb', 90)
+        self.storage_buffer_gb = 10  # Always keep 10GB free
+        self.last_storage_check = 0
+        self.storage_check_interval = 15  # Check every 15 seconds
+        
+    def get_phone_storage_info(self):
+        """Get detailed phone storage information"""
+        try:
+            # Method 1: Use df command
+            output = run_adb_command(['shell', 'df', '/sdcard'])
+            
+            for line in output.strip().split('\n'):
+                if '/sdcard' in line or '/storage/emulated' in line:
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        # df output: Filesystem 1K-blocks Used Available Use% Mounted
+                        total_kb = int(parts[1])
+                        available_kb = int(parts[3])
+                        used_kb = total_kb - available_kb
+                        
+                        return {
+                            'total_gb': total_kb / (1024 * 1024),
+                            'available_gb': available_kb / (1024 * 1024),
+                            'used_gb': used_kb / (1024 * 1024),
+                            'used_percent': (used_kb / total_kb) * 100 if total_kb > 0 else 0
+                        }
+            
+            # Fallback method: Use statvfs
+            stat_output = run_adb_command(['shell', 'stat', '-f', '/sdcard'])
+            # Parse statvfs output for block size and free blocks
+            
+            return None
+            
+        except Exception as e:
+            log(f"[存储检查] 获取存储信息失败: {e}")
+            return None
+    
+    def calculate_safe_batch_size_adaptive(self, parallel_mode=True):
+        """Calculate safe batch size with adaptive logic"""
+        current_time = time.time()
+        
+        # Rate limit storage checks
+        if current_time - self.last_storage_check < self.storage_check_interval:
+            return min(self.max_batch_size_gb, params.get('batch_size_gb', 90))
+        
+        self.last_storage_check = current_time
+        storage_info = self.get_phone_storage_info()
+        
+        if not storage_info:
+            console.print("[yellow]⚠ 无法获取存储信息，使用保守批次大小[/yellow]")
+            return self.min_batch_size_gb * 2  # Conservative fallback
+        
+        available_gb = storage_info['available_gb']
+        used_percent = storage_info['used_percent']
+        
+        console.print(f"[blue]📱 存储状态: {available_gb:.1f}GB 可用 ({used_percent:.1f}% 已用)[/blue]")
+        
+        # Calculate safe space accounting for parallel processing
+        reserve_space = self.storage_buffer_gb
+        if parallel_mode:
+            # Account for potential 2 batches + processing overhead
+            usable_space = (available_gb - reserve_space) / 2.5
+        else:
+            # Single batch mode
+            usable_space = available_gb - reserve_space
+        
+        # Apply size constraints
+        safe_batch_size = max(self.min_batch_size_gb, usable_space)
+        safe_batch_size = min(self.max_batch_size_gb, safe_batch_size)
+        
+        # Emergency reductions based on usage
+        if used_percent > 95:
+            safe_batch_size = self.min_batch_size_gb
+            console.print(f"[red]🚨 存储危险 ({used_percent:.1f}%)，最小批次: {safe_batch_size}GB[/red]")
+        elif used_percent > 90:
+            safe_batch_size = min(safe_batch_size, self.min_batch_size_gb * 2)
+            console.print(f"[yellow]⚠ 存储紧张 ({used_percent:.1f}%)，减少批次: {safe_batch_size:.1f}GB[/yellow]")
+        elif used_percent > 80:
+            safe_batch_size = min(safe_batch_size, safe_batch_size * 0.8)
+            console.print(f"[yellow]📊 存储警告 ({used_percent:.1f}%)，调整批次: {safe_batch_size:.1f}GB[/yellow]")
+        else:
+            console.print(f"[green]✅ 存储充足，批次大小: {safe_batch_size:.1f}GB[/green]")
+        
+        return safe_batch_size
+    
+    def get_next_file_batch_with_storage_awareness(self, parallel_mode=True):
+        """Get next batch with storage-aware sizing"""
+        # Calculate safe batch size
+        safe_batch_size_gb = self.calculate_safe_batch_size_adaptive(parallel_mode)
+        
+        # Pre-flight storage check
+        storage_info = self.get_phone_storage_info()
+        if storage_info:
+            if storage_info['available_gb'] < (safe_batch_size_gb + self.storage_buffer_gb):
+                console.print("[red]⏸ 存储空间不足，等待清理[/red]")
+                return []
+        
+        # Update current params with calculated size
+        original_size = params.get('batch_size_gb', 90)
+        if abs(safe_batch_size_gb - original_size) > 1:
+            console.print(f"[cyan]🔄 动态调整: {original_size}GB → {safe_batch_size_gb:.1f}GB[/cyan]")
+        
+        # Get batch with calculated size
+        return self.get_next_file_batch(
+            max_files=params.get('batch_size', 1000),
+            max_size_gb=safe_batch_size_gb
+        )
+    
+    def verify_storage_after_cleanup(self, expected_freed_gb):
+        """Verify storage was actually freed after cleanup"""
+        try:
+            time.sleep(2)  # Wait for filesystem sync
+            storage_info = self.get_phone_storage_info()
+            
+            if storage_info:
+                available_gb = storage_info['available_gb']
+                console.print(f"[blue]📊 清理后存储: {available_gb:.1f}GB 可用[/blue]")
+                
+                # Check if we have reasonable space for next batch
+                if available_gb > (self.min_batch_size_gb + self.storage_buffer_gb):
+                    return True
+                else:
+                    console.print(f"[yellow]⚠ 清理后存储仍不足: {available_gb:.1f}GB[/yellow]")
+                    return False
+            return False
+        except Exception as e:
+            console.print(f"[red]存储验证失败: {e}[/red]")
+            return False
+    
+    def emergency_storage_check(self):
+        """Emergency check if storage is critically low"""
+        storage_info = self.get_phone_storage_info()
+        if storage_info:
+            if storage_info['used_percent'] > 98:
+                console.print("[red]🚨 存储严重不足，强制暂停[/red]")
+                return False
+            elif storage_info['available_gb'] < 2:
+                console.print("[red]🚨 可用空间不足2GB，强制暂停[/red]")
+                return False
+        return True
+class SafeParallelBatchScheduler:
+    """Safe parallel scheduler with comprehensive storage management"""
+    
+    def __init__(self, db_path):
+        self.db_path = db_path  # Store DB path instead of connection
+        self.push_queue = Queue(maxsize=1)
+        self.running = False
+        self.total_batches_pushed = 0
+        self.total_batches_processed = 0
+        
+    def _push_worker(self):
+        """Enhanced push worker with storage monitoring"""
+        # Create thread-local database connection
+        conn = sqlite3.connect(self.db_path)
+        storage_manager = StorageAwareBatchManager(conn)
+        
+        consecutive_failures = 0
+        max_failures = 3
+        
+        try:
+            while self.running and batch_processing:
+                try:
+                    # Emergency storage check
+                    if not storage_manager.emergency_storage_check():
+                        console.print("[red]🛑 存储紧急暂停，等待60秒[/red]")
+                        time.sleep(60)
+                        continue
+                    
+                    # Check if we can push (queue not full)
+                    if self.push_queue.qsize() == 0:
+                        # Get storage-aware batch
+                        file_batch = storage_manager.get_next_file_batch_with_storage_awareness(
+                            parallel_mode=True
+                        )
+                        
+                        if file_batch:
+                            # Pre-push storage verification
+                            batch_size_gb = sum(f['size'] for f in file_batch) / (1024**3)
+                            
+                            # Double-check storage before push
+                            storage_info = storage_manager.get_phone_storage_info()
+                            if storage_info:
+                                required_space = batch_size_gb + storage_manager.storage_buffer_gb
+                                if storage_info['available_gb'] < required_space:
+                                    console.print(f"[yellow]⏸ 推送前检查: 需要{required_space:.1f}GB，仅有{storage_info['available_gb']:.1f}GB[/yellow]")
+                                    time.sleep(30)
+                                    continue
+                            
+                            # Proceed with push
+                            batch_id = storage_manager.start_new_batch()
+                            console.print(f"[cyan]📤 推送批次 {self.total_batches_pushed + 1}: {len(file_batch)} 文件 ({batch_size_gb:.1f}GB)[/cyan]")
+                            
+                            remote_temp_folder = f"{REMOTE_ROOT}/batch_temp_{int(time.time())}"
+                            success_count = push_files_individually(
+                                storage_manager, file_batch, remote_temp_folder
+                            )
+                            
+                            if success_count > 0:
+                                batch_info = {
+                                    'batch_id': batch_id,
+                                    'file_batch': file_batch,
+                                    'remote_temp_folder': remote_temp_folder,
+                                    'success_count': success_count,
+                                    'batch_size_gb': batch_size_gb
+                                }
+                                
+                                try:
+                                    self.push_queue.put(batch_info, timeout=30)
+                                    self.total_batches_pushed += 1
+                                    consecutive_failures = 0
+                                    console.print(f"[green]✅ 批次 {self.total_batches_pushed} 推送完成[/green]")
+                                except:
+                                    console.print("[yellow]⚠ 处理队列满，等待处理[/yellow]")
+                                    time.sleep(10)
+                            else:
+                                console.print(f"[red]❌ 批次推送失败: {batch_id}[/red]")
+                                storage_manager.complete_batch('failed')
+                                consecutive_failures += 1
+                                
+                                if consecutive_failures >= max_failures:
+                                    console.print(f"[red]🛑 连续{max_failures}次推送失败，暂停推送[/red]")
+                                    time.sleep(120)
+                                    consecutive_failures = 0
+                        else:
+                            # No more files to process
+                            if check_all_files_processed_with_retry(conn):
+                                console.print("[green]📤 所有文件推送完成[/green]")
+                                break
+                            time.sleep(5)
+                    else:
+                        # Queue full, wait for processing
+                        time.sleep(15)
+                        
+                except Exception as e:
+                    console.print(f"[red]推送线程错误: {e}[/red]")
+                    consecutive_failures += 1
+                    time.sleep(min(10 * consecutive_failures, 60))
+        finally:
+            conn.close()
+    
+    def _process_worker(self):
+        """Enhanced process worker with cleanup verification"""
+        # Create thread-local database connection
+        conn = sqlite3.connect(self.db_path)
+        
+        try:
+            while self.running and batch_processing:
+                try:
+                    # Check CPU status
+                    with cpu_status_lock:
+                        cpu_idle = not cpu_active_flag
+                    
+                    if cpu_idle and not self.push_queue.empty():
+                        try:
+                            batch_info = self.push_queue.get(timeout=5)
+                            
+                            console.print(f"[yellow]📱 处理批次 {self.total_batches_processed + 1}: {batch_info['batch_id']}[/yellow]")
+                            
+                            # Move to Camera with storage verification
+                            camera_folder = f"{CAMERA_ROOT}/batch_{int(time.time())}"
+                            
+                            if move_remote_folder_safe(batch_info['remote_temp_folder'], camera_folder):
+                                mark_pushed_files_completed(conn, batch_info['file_batch'])
+                                
+                                console.print("[yellow]⏳ 等待 Google Photos 处理...[/yellow]")
+                                backup_completed = wait_for_backup_complete()
+                                
+                                if backup_completed:
+                                    # Enhanced cleanup with verification
+                                    console.print(f"[cyan]🧹 清理 Camera 目录: {camera_folder}[/cyan]")
+                                    cleanup_camera_folder(camera_folder)
+                                    
+                                    # Create temporary batch manager for completion
+                                    temp_storage_manager = StorageAwareBatchManager(conn)
+                                    temp_storage_manager.current_batch_id = batch_info['batch_id']
+                                    
+                                    # Verify cleanup freed space
+                                    if temp_storage_manager.verify_storage_after_cleanup(batch_info['batch_size_gb']):
+                                        self.total_batches_processed += 1
+                                        temp_storage_manager.complete_batch('completed')
+                                        console.print(f"[green]✅ 批次 {self.total_batches_processed} 完成，存储已释放[/green]")
+                                    else:
+                                        console.print("[yellow]⚠ 清理验证失败，但标记为完成[/yellow]")
+                                        self.total_batches_processed += 1
+                                        temp_storage_manager.complete_batch('completed')
+                                else:
+                                    console.print("[yellow]⚠ 备份被中断[/yellow]")
+                                    temp_storage_manager = StorageAwareBatchManager(conn)
+                                    temp_storage_manager.current_batch_id = batch_info['batch_id']
+                                    temp_storage_manager.complete_batch('interrupted')
+                                    self.total_batches_processed += 1
+                            else:
+                                console.print("[red]❌ 批次移动失败[/red]")
+                                temp_storage_manager = StorageAwareBatchManager(conn)
+                                temp_storage_manager.current_batch_id = batch_info['batch_id']
+                                temp_storage_manager.complete_batch('failed')
+                                
+                        except:
+                            # Queue was empty, continue
+                            pass
+                            
+                    elif not cpu_idle:
+                        time.sleep(params['monitor_interval'])
+                    else:
+                        # No batch to process, wait
+                        if self.total_batches_pushed > self.total_batches_processed:
+                            time.sleep(2)
+                        else:
+                            if not self.running or not batch_processing:
+                                break
+                            time.sleep(5)
+                            
+                except Exception as e:
+                    console.print(f"[red]处理线程错误: {e}[/red]")
+                    time.sleep(10)
+        finally:
+            conn.close()
+    
+    def start_safe_parallel_processing(self):
+        """Start safe parallel processing"""
+        if self.running:
+            return
+            
+        # Initial storage check with temporary connection
+        temp_conn = sqlite3.connect(self.db_path)
+        temp_storage_manager = StorageAwareBatchManager(temp_conn)
+        storage_info = temp_storage_manager.get_phone_storage_info()
+        temp_conn.close()
+        
+        if storage_info:
+            if storage_info['used_percent'] > 95:
+                console.print("[red]⚠ 警告: 存储空间严重不足，建议先清理手机[/red]")
+                return False
+            elif storage_info['available_gb'] < 15:
+                console.print("[red]⚠ 警告: 可用空间少于15GB，不建议并行处理[/red]")
+                return False
+        
+        self.running = True
+        console.print("[bold green]🚀 安全并行处理启动[/bold green]")
+        
+        # Start worker threads
+        self.push_thread = threading.Thread(target=self._push_worker, daemon=True)
+        self.process_thread = threading.Thread(target=self._process_worker, daemon=True)
+        
+        self.push_thread.start()
+        self.process_thread.start()
+        
+        return True
+
+def safe_parallel_batch_process_thread():
+    """Safe parallel batch processing with storage management"""
+    global batch_in_process, batch_processing
+    
+    try:
+        # Pass DB path instead of connection
+        scheduler = SafeParallelBatchScheduler(DB_PATH)
+        
+        # Start safe parallel processing
+        if not scheduler.start_safe_parallel_processing():
+            console.print("[red]❌ 无法启动并行处理 - 存储空间不足[/red]")
+            return
+        
+        # Monitor processing with separate connection
+        conn = sqlite3.connect(DB_PATH)
+        last_status_time = time.time()
+        
+        try:
+            while batch_processing:
+                status = {
+                    'total_pushed': scheduler.total_batches_pushed,
+                    'total_processed': scheduler.total_batches_processed,
+                    'queue_size': scheduler.push_queue.qsize()
+                }
+                
+                # Status reporting every 30 seconds
+                if time.time() - last_status_time > 30:
+                    temp_storage_manager = StorageAwareBatchManager(conn)
+                    storage_info = temp_storage_manager.get_phone_storage_info()
+                    if storage_info:
+                        console.print(f"[blue]📊 进度: 推送{status['total_pushed']}/处理{status['total_processed']}, 存储:{storage_info['available_gb']:.1f}GB[/blue]")
+                    last_status_time = time.time()
+                
+                # Check completion
+                if (status['total_pushed'] > 0 and 
+                    status['total_pushed'] == status['total_processed'] and 
+                    status['queue_size'] == 0):
+                    
+                    if check_all_files_processed_with_retry(conn):
+                        console.print(f"[bold green]🎉 安全并行处理完成! 处理{status['total_processed']}个批次[/bold green]")
+                        show_completion_notification(status['total_processed'])
+                        break
+                        
+                time.sleep(3)
+        finally:
+            conn.close()
+            
+        scheduler.running = False
+        
+    except Exception as e:
+        console.print(f"[red]安全并行处理错误: {e}[/red]")
+    finally:
+        batch_processing = False
+        ui_state.set_state('idle')
+
+
+
+# Update the button callback
+def on_start_safe_parallel(event):
+    """Start safe parallel processing"""
+    apply_params_from_ui()
+    
+    can_start, message = ui_state.can_perform_action('start_transfer', 3.0)
+    if not can_start:
+        print(f"[防护] {message}")
+        return
+
+    global batch_processing
+    if batch_processing:
+        print("[提示] 传输已在进行中")
+        return
+
+    # Check prerequisites
+    pending_count = query_pending_files_count()
+    if pending_count == 0:
+        print("[提示] 没有待处理文件，请先扫描资料夹")
+        return
+
+    # Ensure CPU monitoring
+    if not cpu_monitoring:
+        print("[警告] CPU监控未启动，正在自动启动...")
+        auto_start_cpu_monitoring()
+        time.sleep(1)
+
+    # Check ADB
+    try:
+        run_adb_command(['devices'])
+        print("[检查] ADB连接正常")
+    except Exception as e:
+        print(f"[错误] ADB连接失败: {e}")
+        return
+
+    ui_state.set_state('processing')
+    batch_processing = True
+    
+    log("[UI] 启动安全并行批次处理")
+    threading.Thread(target=safe_parallel_batch_process_thread, daemon=True).start()
+    
+    print(f"[成功] 安全并行处理已启动，待处理: {pending_count}")
+
+
+
 def dynamic_batch_process_thread():
     """動態批次處理線程 - 優化日誌版本"""
     global batch_in_process, batch_processing
@@ -1557,7 +2019,11 @@ base_y_bottom = base_y_top - button_gap_y
 ax_start = plt.axes([base_x, base_y_top, button_width, button_height])
 button_start = Button(ax_start, '開始傳輸')
 button_start.label.set_fontsize(12)
-button_start.on_clicked(on_start_dynamic)
+
+# Update button binding
+# button_start.on_clicked(on_start_dynamic)
+button_start.on_clicked(on_start_safe_parallel)
+
 
 ax_stop = plt.axes([base_x + button_width + button_gap_x, base_y_top, button_width, button_height])
 button_stop = Button(ax_stop, '停止傳輸')
